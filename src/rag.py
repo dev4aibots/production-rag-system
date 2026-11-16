@@ -93,6 +93,39 @@ def _token_count(text: str) -> int:
     return len(text.split())
 
 
+def _split_oversized(para: str, source: str, chunk_index: int, chunk_size: int, overlap: int) -> list[Chunk]:
+    """Split a paragraph that is larger than chunk_size into sentence-boundary chunks."""
+    sentences = re.split(r"(?<=[.!?])\s+", para.strip())
+    chunks: list[Chunk] = []
+    current = ""
+    for sent in sentences:
+        if _token_count(current) + _token_count(sent) <= chunk_size or not current:
+            current = (current + " " + sent).strip() if current else sent
+        else:
+            chunks.append(
+                Chunk(
+                    id=hashlib.sha256(f"{source}:{chunk_index}".encode()).hexdigest()[:16],
+                    text=current,
+                    source=source,
+                    chunk_index=chunk_index,
+                    token_count=_token_count(current),
+                )
+            )
+            chunk_index += 1
+            current = sent
+    if current:
+        chunks.append(
+            Chunk(
+                id=hashlib.sha256(f"{source}:{chunk_index}".encode()).hexdigest()[:16],
+                text=current,
+                source=source,
+                chunk_index=chunk_index,
+                token_count=_token_count(current),
+            )
+        )
+    return chunks
+
+
 def chunk_document(text: str, source: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[Chunk]:
     """Structure-aware chunking: splits on paragraphs first, then sentences,
     ensuring chunks never break mid-sentence where possible."""
@@ -103,6 +136,24 @@ def chunk_document(text: str, source: str, chunk_size: int = CHUNK_SIZE, overlap
     current_source = source
     chunk_index = 0
     for para in paragraphs:
+        if _token_count(para) > chunk_size:
+            # Paragraph alone exceeds chunk size: flush pending, split by sentence
+            if current:
+                chunks.append(
+                    Chunk(
+                        id=hashlib.sha256(f"{source}:{chunk_index}".encode()).hexdigest()[:16],
+                        text=current,
+                        source=source,
+                        chunk_index=chunk_index,
+                        token_count=_token_count(current),
+                    )
+                )
+                chunk_index += 1
+                current = ""
+            sub = _split_oversized(para, source, chunk_index, chunk_size, overlap)
+            chunks.extend(sub)
+            chunk_index += len(sub)
+            continue
         if _token_count(current) + _token_count(para) <= chunk_size:
             current = (current + " " + para).strip() if current else para
         else:
@@ -310,6 +361,13 @@ def hybrid_retrieve(
 # ---------------------------------------------------------------------------
 # Generation with citation enforcement
 # ---------------------------------------------------------------------------
+MIN_RELEVANCE_SCORE = float(os.environ.get("MIN_RELEVANCE_SCORE", "0.05"))
+
+
+def _query_terms(query: str) -> set[str]:
+    return set(re.findall(r"\w+", query.lower()))
+
+
 def generate_answer(
     query: str,
     results: list[RetrievalResult],
@@ -320,7 +378,13 @@ def generate_answer(
     start = time.time()
     citations: list[dict[str, Any]] = []
 
-    if not results:
+    q_terms = _query_terms(query)
+    top = results[0] if results else None
+    # Relevance gate: require either a shared token or a strong fusion score.
+    top_terms = set(re.findall(r"\w+", top.chunk.text.lower())) if top else set()
+    has_overlap = bool(q_terms & top_terms)
+
+    if not top or not has_overlap:
         latency_ms = int((time.time() - start) * 1000)
         return Answer(
             answer="insufficient_evidence",
