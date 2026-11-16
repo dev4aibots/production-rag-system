@@ -295,6 +295,38 @@ class VectorStore:
 # ---------------------------------------------------------------------------
 # Hybrid retrieval (dense + BM25 + RRF)
 # ---------------------------------------------------------------------------
+def _bm25_scores(query_terms: list[str], chunks: list[Chunk], avgdl: float) -> list[float]:
+    """BM25 with proper corpus-wide IDF (k1=1.5, b=0.75)."""
+    n = len(chunks)
+    if n == 0:
+        return []
+    # document frequency per term over the corpus
+    term_df: dict[str, int] = {}
+    docs_terms: list[list[str]] = []
+    for c in chunks:
+        terms = re.findall(r"\w+", c.text.lower())
+        docs_terms.append(terms)
+        for t in set(terms):
+            term_df[t] = term_df.get(t, 0) + 1
+    k1, b = 1.5, 0.75
+    scores = []
+    for terms, c in zip(docs_terms, chunks):
+        from collections import Counter
+        tf = Counter(terms)
+        q = query_terms
+        score = 0.0
+        for term in q:
+            f = tf.get(term, 0)
+            if f == 0:
+                continue
+            df = term_df.get(term, 1)
+            idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
+            denom = f + k1 * (1 - b + b * _token_count(c.text) / avgdl)
+            score += idf * (f * (k1 + 1)) / denom
+        scores.append(score)
+    return scores
+
+
 def hybrid_retrieve(
     store: VectorStore,
     query: str,
@@ -304,7 +336,7 @@ def hybrid_retrieve(
     # Dense retrieval
     dense_results = store.search(query, top_k=top_k * 2)
 
-    # BM25 retrieval over all chunks
+    # BM25 retrieval over all chunks (proper IDF)
     query_terms = re.findall(r"\w+", query.lower())
     all_chunks = store.chunks
     if not all_chunks:
@@ -313,13 +345,12 @@ def hybrid_retrieve(
     total_len = sum(_token_count(c.text) for c in all_chunks)
     avgdl = total_len / len(all_chunks) if all_chunks else 1.0
 
-    bm25_scores = []
-    for c in all_chunks:
-        doc_terms = re.findall(r"\w+", c.text.lower())
-        score = _bm25_score(query_terms, doc_terms, _token_count(c.text), avgdl)
-        bm25_scores.append(score)
+    bm25_scores = _bm25_scores(query_terms, all_chunks, avgdl)
+    max_bm = max(bm25_scores) if bm25_scores else 1.0
 
-    # Build lookup
+    # Normalized BM25 (0-1)
+    bm25_norm = [s / max_bm if max_bm else 0.0 for s in bm25_scores]
+
     chunk_by_id = {c.id: c for c in all_chunks}
     dense_by_id = {c.id: score for c, score in dense_results}
 
@@ -331,28 +362,28 @@ def hybrid_retrieve(
         combined[c.id] = RetrievalResult(
             chunk=c,
             dense_score=dense_score,
-            bm25_score=bm25_scores[all_chunks.index(c)] if c in all_chunks else 0.0,
+            bm25_score=bm25_norm[all_chunks.index(c)],
             rrf_score=rrf,
             rerank_score=_rerank_score(query, c.text),
             final_score=0.0,
         )
 
     # Add BM25-only results not in dense
-    for rank, c in enumerate(sorted(all_chunks, key=lambda x: bm25_scores[all_chunks.index(x)], reverse=True)[: top_k * 2]):
+    for rank, c in enumerate(sorted(all_chunks, key=lambda x: bm25_norm[all_chunks.index(x)], reverse=True)[: top_k * 2]):
         if c.id not in combined:
             rrf = 1.0 / (rrf_k + rank + 1)
             combined[c.id] = RetrievalResult(
                 chunk=c,
                 dense_score=0.0,
-                bm25_score=bm25_scores[all_chunks.index(c)],
+                bm25_score=bm25_norm[all_chunks.index(c)],
                 rrf_score=rrf,
                 rerank_score=_rerank_score(query, c.text),
                 final_score=0.0,
             )
 
-    # Final score = weighted combination
+    # Final score = weighted combination (BM25 normalized counts)
     for r in combined.values():
-        r.final_score = 0.5 * r.rrf_score + 0.3 * r.rerank_score + 0.2 * max(r.dense_score, 0)
+        r.final_score = 0.35 * r.rrf_score + 0.30 * r.rerank_score + 0.20 * max(r.dense_score, 0) + 0.15 * r.bm25_score
 
     results = sorted(combined.values(), key=lambda x: x.final_score, reverse=True)[:rerank_top_k]
     return results
@@ -364,8 +395,16 @@ def hybrid_retrieve(
 MIN_RELEVANCE_SCORE = float(os.environ.get("MIN_RELEVANCE_SCORE", "0.05"))
 
 
+STOPWORDS = set(
+    "a an and are as at be but by for from has have how if in is it its of on or that the"
+    " this to was were what when where which who why will with would can could should do does did"
+    " not no yes you your i we they he she it's don't just about than then so such only also into over"
+    .split()
+)
+
+
 def _query_terms(query: str) -> set[str]:
-    return set(re.findall(r"\w+", query.lower()))
+    return set(re.findall(r"\w+", query.lower())) - STOPWORDS
 
 
 def generate_answer(
@@ -380,9 +419,13 @@ def generate_answer(
 
     q_terms = _query_terms(query)
     top = results[0] if results else None
-    # Relevance gate: require either a shared token or a strong fusion score.
-    top_terms = set(re.findall(r"\w+", top.chunk.text.lower())) if top else set()
-    has_overlap = bool(q_terms & top_terms)
+    # Relevance gate: require a non-stopword overlap with ANY of the top results.
+    has_overlap = False
+    for r in results[:3]:
+        top_terms = set(re.findall(r"\w+", r.chunk.text.lower())) - STOPWORDS
+        if q_terms & top_terms:
+            has_overlap = True
+            break
 
     if not top or not has_overlap:
         latency_ms = int((time.time() - start) * 1000)
@@ -433,9 +476,12 @@ def generate_answer(
         except Exception:
             answer_text = "insufficient_evidence"
     else:
-        # Deterministic local fallback: extractive answer from best chunk
-        best = results[0]
-        answer_text = f"Based on {best.chunk.source}: {best.chunk.text[:300]}"
+        # Deterministic local fallback: multi-source extractive answer.
+        parts = []
+        for r in results[:3]:
+            snippet = r.chunk.text[:240].strip()
+            parts.append(f"[{r.chunk.source}] {snippet}")
+        answer_text = "\n".join(parts)
 
     insufficient = "insufficient_evidence" in answer_text.lower() and len(answer_text) < 30
     confidence = round(results[0].final_score if results else 0.0, 3)

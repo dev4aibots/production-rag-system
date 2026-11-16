@@ -1,23 +1,21 @@
-# Production RAG System
+﻿# Production RAG System
 
 Production-grade Retrieval-Augmented Generation with verified citations, eval regression gating, and CI. Built to be cloned, run, and measured.
 
 | Pillar | Status | Evidence |
 |--------|--------|----------|
 | **Execution Mode** | Live Full Backend | `make dev` runs FastAPI + eval suite |
-| **Tests** | 18 passing | `pytest` |
-| **Eval Gate** | CI blocks regressions | `make eval` + McNemar gate |
+| **Tests** | 17 passing | `pytest` |
+| **Evals** | 30-case golden set, results committed | `python evals/run_evals.py` |
 | **Authorship** | Solo Original | Devraj Gadhvi |
-| **Benchmarks** | Measured locally | `evals/results.jsonl` |
-
 ## What it does
 
 A RAG pipeline over a document corpus with:
 - **Structure-aware chunking** (respects document boundaries, metadata carried per chunk)
 - **Hybrid retrieval** (dense embeddings + BM25 keyword, fused with RRF)
 - **Cross-encoder reranking** on top-k candidates
-- **Citation enforcement** — every answer chained to verbatim source quotes; unsupported claims return `insufficient_evidence`
-- **Eval regression gate** — paired statistical test (McNemar) fails CI on real drops
+- **Citation enforcement** â€” every answer chained to verbatim source quotes; unsupported claims return `insufficient_evidence`
+- **Eval regression gate** â€” paired statistical test (McNemar) fails CI on real drops
 - **FastAPI `/ask` endpoint** with structured Pydantic outputs
 - **Docker** one-command deploy
 
@@ -46,27 +44,46 @@ make eval         # exits non-zero on regression
 ## Architecture
 
 ```
-Document → Chunk → Embed → Vector Store (FAISS)
-                    ↑
-Query → Embed → Hybrid Search (dense + BM25 + RRF) → Rerank → Answer with Citations
+Document â†’ Chunk â†’ Embed â†’ Vector Store (FAISS)
+                    â†‘
+Query â†’ Embed â†’ Hybrid Search (dense + BM25 + RRF) â†’ Rerank â†’ Answer with Citations
 ```
 
-## Eval Results (measured locally)
 
-| Metric | Value | Provenance | Command |
-|--------|-------|------------|---------|
-| Recall@5 | 0.91 | Independently measured | `make eval` |
-| Citation correctness | 0.94 | Independently measured | `make eval` |
-| Faithfulness | 0.89 | Independently measured | `make eval` |
-| P95 latency | 2.4s | Independently measured | `make eval` |
-| Cost per query | $0.004 | Independently measured | `make eval` |
+## Evals
 
-Raw results committed to `evals/results.jsonl`.
+A committed 30-case golden test set (`evals/test_set.py`) over a fixed corpus
+(`evals/corpus.md`), with a runner that reports metrics and writes results:
+
+```bash
+python evals/run_evals.py            # offline deterministic path
+python evals/run_evals.py --llm      # real LLM generation (requires OPENAI_API_KEY)
+```
+
+Committed results: `evals/results-summary.json`, per-case `evals/results.jsonl`,
+baseline `evals/baseline.json`.
+
+| Metric | Value (offline) |
+|--------|------------------|
+| Accuracy | 0.933 |
+| Answerable correct | 0.913 |
+| Unanswerable rejected | 1.000 |
+| Citation correctness | 1.000 |
+| Faithfulness | 0.933 |
+| Recall@k | 0.767 |
+| Latency p50 / p95 | 1 / 2 ms |
+| Est. cost (LLM path, per run) | $0.003 |
+
+The LLM service (`src/llm_service.py`) enforces a per-IP rate limit and a
+daily spend cap; keys are read from environment only.
 
 ## CI
 
-GitHub Actions runs `pytest` + `make eval` on every push. The eval gate uses a McNemar paired test — it exits non-zero when a change causes a statistically significant regression, so bad code never deploys.
+GitHub Actions runs `pytest` + `make eval` on every push. The eval gate uses a McNemar paired test â€” it exits non-zero when a change causes a statistically significant regression, so bad code never deploys.
 
 ## License
 
 MIT
+
+
+

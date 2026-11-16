@@ -1,0 +1,17 @@
+{
+  "baseline": "2026-11-16",
+  "use_llm": false,
+  "top_k": 5,
+  "rerank_top_k": 3,
+  "n_cases": 30,
+  "accuracy": 0.9333,
+  "answerable_correct": 0.913,
+  "unanswerable_rejected": 1.0,
+  "citation_correctness": 1.0,
+  "faithfulness": 0.9333,
+  "recall_at_k": 0.7667,
+  "latency_ms_p50": 1,
+  "latency_ms_p95": 2,
+  "estimated_total_cost_usd": 0.00306,
+  "notes": "Offline deterministic path (no API key). LLM path adds real generation cost recorded in spend-log."
+}
