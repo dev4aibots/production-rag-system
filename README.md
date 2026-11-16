@@ -14,8 +14,8 @@ A RAG pipeline over a document corpus with:
 - **Structure-aware chunking** (respects document boundaries, metadata carried per chunk)
 - **Hybrid retrieval** (dense embeddings + BM25 keyword, fused with RRF)
 - **Cross-encoder reranking** on top-k candidates
-- **Citation enforcement** â€” every answer chained to verbatim source quotes; unsupported claims return `insufficient_evidence`
-- **Eval regression gate** â€” paired statistical test (McNemar) fails CI on real drops
+- **Citation enforcement** — every answer chained to verbatim source quotes; unsupported claims return `insufficient_evidence`
+- **Eval regression gate** — paired statistical test (McNemar) fails CI on real drops
 - **FastAPI `/ask` endpoint** with structured Pydantic outputs
 - **Docker** one-command deploy
 
@@ -79,7 +79,7 @@ daily spend cap; keys are read from environment only.
 
 ## CI
 
-GitHub Actions runs `pytest` + `make eval` on every push. The eval gate uses a McNemar paired test â€” it exits non-zero when a change causes a statistically significant regression, so bad code never deploys.
+GitHub Actions runs `pytest` + `make eval` on every push. The eval gate uses a McNemar paired test — it exits non-zero when a change causes a statistically significant regression, so bad code never deploys.
 
 ## License
 
